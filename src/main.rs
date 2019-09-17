@@ -49,6 +49,12 @@
 use cortex_m;
 
 //#[macro_use]
+use cortex_m_rt::entry;
+use embedded_hal::{
+	digital::v2::{InputPin, OutputPin},
+	watchdog::{Watchdog, WatchdogEnable},
+};
+use onewire::*;
 use panic_halt as _;
 use room_pill::{
 	ac_switch::*,
@@ -56,15 +62,11 @@ use room_pill::{
 	ir::NecReceiver,
 	ir_remote::*,
 	rgb::{Colors, RgbLed},
-	timing::{Ticker, TimeSource, TimeExt, Duration, MicroSeconds},
+	timing::{Duration, MicroSeconds, Ticker, TimeExt, TimeSource},
 };
-use cortex_m_rt::entry;
-use embedded_hal::{
-	digital::v2::{InputPin, OutputPin},
-	watchdog::{Watchdog, WatchdogEnable},
-};
-use onewire::*;
 use stm32f1xx_hal::{can::*, delay::Delay, prelude::*, rtc, watchdog::IndependentWatchdog};
+
+mod roll;
 
 #[entry]
 fn main() -> ! {
@@ -233,6 +235,7 @@ fn window_unit_main() -> ! {
 			}
 			_ => {}
 		};
+
 		switch_roll_up.update(ac_period, delta).unwrap();
 		switch_roll_down.update(ac_period, delta).unwrap();
 
