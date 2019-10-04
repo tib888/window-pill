@@ -35,13 +35,13 @@ impl Roll {
         }
     }
 
-    pub fn update<DURATION>(&mut self, command: Command<DURATION>)
+    pub fn update<DURATION>(&mut self, command: Command<DURATION>) -> State
     where
         DURATION: Into<Position>,
     {
         match command {
             Command::TimePassed(delta_t) => {
-                let driving_current_detected = false; //TODO...
+                let driving_current_detected = false; //TODO... let roll_motor_current: u16 = adc1.read(&mut roll_motor_current_sense).unwrap();
 
                 match self.state {
                     State::Stopped => {}
@@ -49,7 +49,6 @@ impl Roll {
                         if !driving_current_detected {
                             self.state = State::Stopped;
                             self.bottom_position = Some(self.current_position);
-                        //TODO drive
                         } else {
                             let delta_pos: Position = delta_t.into();
                             self.current_position += delta_pos;
@@ -58,7 +57,6 @@ impl Roll {
                                 if self.current_position >= target_position {
                                     self.target_position = None;
                                     self.state = State::Stopped;
-                                    //TODO drive
                                 }
                             }
                         }
@@ -67,7 +65,6 @@ impl Roll {
                         if !driving_current_detected {
                             self.state = State::Stopped;
                             self.current_position = Position::default();
-                        //TODO drive
                         } else {
                             let delta_pos: Position = delta_t.into();
                             if self.current_position < delta_pos {
@@ -79,7 +76,6 @@ impl Roll {
                                 if self.current_position <= target_position {
                                     self.target_position = None;
                                     self.state = State::Stopped;
-                                    //TODO drive
                                 }
                             }
                         }
@@ -92,12 +88,10 @@ impl Roll {
             Command::SendUp => {
                 self.target_position = None;
                 self.state = State::DrivingUp;
-                //TODO drive
             }
             Command::SendDown => {
                 self.target_position = None;
                 self.state = State::DrivingDown;
-                //TODO drive
             }
             Command::SendTo(target) => {
                 if let Some(bottom_position) = self.bottom_position {
@@ -106,16 +100,15 @@ impl Roll {
 
                     if self.current_position < target_position {
                         self.state = State::DrivingDown;
-                    //TODO drive
                     } else if self.current_position > target_position {
                         self.state = State::DrivingUp;
-                    //TODO drive
                     } else {
                         self.state = State::Stopped;
-                        //TODO drive
                     }
                 }
             }
         }
+
+        self.state
     }
 }

@@ -64,7 +64,7 @@ use room_pill::{
 	rgb::{Colors, RgbLed},
 	timing::{Duration, MicroSeconds, Ticker, TimeExt, TimeSource},
 };
-use stm32f1xx_hal::{can::*, delay::Delay, prelude::*, rtc, watchdog::IndependentWatchdog};
+use stm32f1xx_hal::{can::*, delay::Delay, prelude::*, rtc, watchdog::IndependentWatchdog, adc};
 
 mod roll;
 
@@ -92,7 +92,7 @@ fn window_unit_main() -> ! {
 		.hclk(72.mhz())
 		.pclk1(36.mhz())
 		.pclk2(72.mhz())
-		//.adcclk(12.mhz())
+		.adcclk(9.mhz())	 //ADC clock: PCLK2 / 8. User specified value is be approximated using supported prescaler values 2/4/6/8.
 		.freeze(&mut flash.acr);
 	watchdog.feed();
 
@@ -101,9 +101,14 @@ fn window_unit_main() -> ! {
 	let mut backup_domain = rcc.bkp.constrain(dp.BKP, &mut rcc.apb1, &mut pwr);
 	// real time clock
 	let rtc = rtc::Rtc::rtc(dp.RTC, &mut backup_domain);
+
+	// A/D converter
+    let mut adc1 = adc::Adc::adc1(dp.ADC1, &mut rcc.apb2, clocks);
+
 	watchdog.feed();
 
 	let mut afio = dp.AFIO.constrain(&mut rcc.apb2);
+
 	//configure pins:
 	let mut gpioa = dp.GPIOA.split(&mut rcc.apb2);
 	let mut gpiob = dp.GPIOB.split(&mut rcc.apb2);
@@ -128,10 +133,10 @@ fn window_unit_main() -> ! {
 	let open_alarm = gpioa.pa5.into_pull_up_input(&mut gpioa.crl);
 
 	// A6 - ADC6 valve motor driver current sense shunt
-	let valve_motor_current_sense = gpioa.pa6.into_floating_input(&mut gpioa.crl);
+	let valve_motor_current_sense = gpioa.pa6.into_analog(&mut gpioa.crl);
 
 	// A7 - ADC7 roll motor hall current sense
-	let roll_motor_current_sense = gpioa.pa7.into_floating_input(&mut gpioa.crl);
+	let roll_motor_current_sense = gpioa.pa7.into_analog(&mut gpioa.crl);
 
 	// Optional piezzo speaker on A8 (open drain output)
 	let mut _piezzo = gpioa.pa8.into_open_drain_output(&mut gpioa.crh);
@@ -158,10 +163,10 @@ fn window_unit_main() -> ! {
 	let ir_receiver = pa15.into_pull_up_input(&mut gpioa.crh);
 
 	// Photoresistor on B0 (ADC8)
-	let photoresistor = gpiob.pb0.into_floating_input(&mut gpiob.crl);
+	let photoresistor = gpiob.pb0.into_analog(&mut gpiob.crl);
 
 	//AC main voltage sense on B1 (ADC9)
-	let ac_main_voltage = gpiob.pb1.into_floating_input(&mut gpiob.crl);
+	let ac_main_voltage = gpiob.pb1.into_analog(&mut gpiob.crl);
 
 	// B3 not used, connected to the ground
 	let _b3 = pb3.into_pull_down_input(&mut gpiob.crl);
@@ -197,7 +202,7 @@ fn window_unit_main() -> ! {
 	let mut led = gpioc.pc13.into_push_pull_output(&mut gpioc.crh);
 
 	// C14, C15 used on the bluepill board for 32768Hz xtal
-
+	    
 	watchdog.feed();
 
 	let cp = cortex_m::Peripherals::take().unwrap();
@@ -212,6 +217,8 @@ fn window_unit_main() -> ! {
 	let one_sec = 1_000_000u32.us();
 
 	let mut last_time = tick.now();
+
+	let mut roll = Roll::new();
 
 	//main update loop
 	loop {
@@ -239,21 +246,36 @@ fn window_unit_main() -> ! {
 		switch_roll_up.update(ac_period, delta).unwrap();
 		switch_roll_down.update(ac_period, delta).unwrap();
 
+		let roll_command = Option<roll::Command>::None;
+
 		if let (Some(last), Some(current)) = (switch_roll_up.last_state(), switch_roll_up.state()) {
-			if last != current {
-				ssr_roll_down.set_low().unwrap();
-				ssr_roll_up.set_high().unwrap();
+			if last != current && current == OnOff::On {
+				roll_command = Some(roll::Command::SendUp);
 			}
 		};
 
-		if let (Some(last), Some(current)) =
-			(switch_roll_down.last_state(), switch_roll_down.state())
-		{
-			if last != current {
-				ssr_roll_up.set_low().unwrap();
-				ssr_roll_down.set_high().unwrap();
+		if let (Some(last), Some(current)) = (switch_roll_down.last_state(), switch_roll_down.state()) {
+			if last != current && current == OnOff::On {
+				roll_command = Some(roll::Command::SendDown);
 			}
 		};
+
+		if let roll_command = Some(roll_command) {
+			match roll.update(roll_command) {
+				roll::State::DrivingUp => {				
+					ssr_roll_down.set_low().unwrap();
+					ssr_roll_up.set_high().unwrap();
+				},
+				roll::State::DrivingDown => {
+					ssr_roll_up.set_low().unwrap();
+					ssr_roll_down.set_high().unwrap();				
+				},
+				roll::State::Stopped => {
+					ssr_roll_up.set_low().unwrap();
+					ssr_roll_down.set_low().unwrap();
+				}
+			}
+		}
 
 		// do not execute the followings too often: (temperature conversion time of the sensors is a lower limit)
 		if delta < one_sec {
