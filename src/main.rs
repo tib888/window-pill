@@ -46,6 +46,8 @@
 #![no_main]
 #![no_std]
 
+mod roll;
+
 use cortex_m;
 
 //#[macro_use]
@@ -62,11 +64,13 @@ use room_pill::{
 	ir::NecReceiver,
 	ir_remote::*,
 	rgb::{Colors, RgbLed},
-	timing::{Duration, MicroSeconds, Ticker, TimeExt, TimeSource},
+	timing::{Ticker, TimeExt, TimeSource},
 };
-use stm32f1xx_hal::{can::*, delay::Delay, prelude::*, rtc, watchdog::IndependentWatchdog, adc};
+use stm32f1xx_hal::{adc, can::*, delay::Delay, prelude::*, rtc, watchdog::IndependentWatchdog};
 
-mod roll;
+use roll::Roll;
+
+type Duration = room_pill::timing::Duration<u32, room_pill::timing::MicroSeconds>;
 
 #[entry]
 fn main() -> ! {
@@ -92,7 +96,7 @@ fn window_unit_main() -> ! {
 		.hclk(72.mhz())
 		.pclk1(36.mhz())
 		.pclk2(72.mhz())
-		.adcclk(9.mhz())	 //ADC clock: PCLK2 / 8. User specified value is be approximated using supported prescaler values 2/4/6/8.
+		.adcclk(9.mhz()) //ADC clock: PCLK2 / 8. User specified value is be approximated using supported prescaler values 2/4/6/8.
 		.freeze(&mut flash.acr);
 	watchdog.feed();
 
@@ -103,7 +107,7 @@ fn window_unit_main() -> ! {
 	let rtc = rtc::Rtc::rtc(dp.RTC, &mut backup_domain);
 
 	// A/D converter
-    let mut adc1 = adc::Adc::adc1(dp.ADC1, &mut rcc.apb2, clocks);
+	let mut adc1 = adc::Adc::adc1(dp.ADC1, &mut rcc.apb2, clocks);
 
 	watchdog.feed();
 
@@ -202,7 +206,6 @@ fn window_unit_main() -> ! {
 	let mut led = gpioc.pc13.into_push_pull_output(&mut gpioc.crh);
 
 	// C14, C15 used on the bluepill board for 32768Hz xtal
-	    
 	watchdog.feed();
 
 	let cp = cortex_m::Peripherals::take().unwrap();
@@ -218,7 +221,7 @@ fn window_unit_main() -> ! {
 
 	let mut last_time = tick.now();
 
-	let mut roll = Roll::new();
+	let mut roll = Roll::<Duration>::new();
 
 	//main update loop
 	loop {
@@ -226,55 +229,82 @@ fn window_unit_main() -> ! {
 
 		// calculate the time since last execution:
 		let now = tick.now();
-		let delta = Duration::<u32, MicroSeconds>::from(now - last_time);
+		let delta = Duration::from(now - last_time);
 		last_time = now;
 
 		//update the IR receiver statemachine:
 		let ir_cmd = receiver.receive(now, ir_receiver.is_low().unwrap());
 
+		//update the AC switch sensors statemachine:
+		switch_roll_up.update(ac_period, delta).unwrap();
+		switch_roll_down.update(ac_period, delta).unwrap();
+
+		//update the roll statemachine and forward to the executor SSRs:
+		let roll_state = roll.update(delta);
+		match roll_state {
+			roll::State::DrivingUp => {
+				ssr_roll_down.set_low().unwrap();
+				ssr_roll_up.set_high().unwrap();
+			}
+			roll::State::DrivingDown => {
+				ssr_roll_up.set_low().unwrap();
+				ssr_roll_down.set_high().unwrap();
+			}
+			roll::State::Stopped => {
+				ssr_roll_up.set_low().unwrap();
+				ssr_roll_down.set_low().unwrap();
+			}
+		}
+
+		let mut roll_command = None;
+
+		//process the infrared remote inputs:
 		match ir_cmd {
 			Ok(ir::NecContent::Repeat) => {}
 			Ok(ir::NecContent::Data(data)) => {
-				let command = translate(data);
+				let ir_command = translate(data);
 				//write!(hstdout, "{:x}={:?} ", data, command).unwrap();
 				//model.ir_remote_command(command, &MENU);
 				//model.refresh_display(&mut display, &mut backlight);
+
+				roll_command = match ir_command {
+					IrCommands::Up => Some(roll::Command::SendUp),
+					IrCommands::Down => Some(roll::Command::SendDown),
+					IrCommands::Ok => Some(roll::Command::Stop),
+					_ => None,
+				}
 			}
 			_ => {}
 		};
 
-		switch_roll_up.update(ac_period, delta).unwrap();
-		switch_roll_down.update(ac_period, delta).unwrap();
-
-		let roll_command = Option<roll::Command>::None;
-
+		//process the AC switch inputs:
 		if let (Some(last), Some(current)) = (switch_roll_up.last_state(), switch_roll_up.state()) {
 			if last != current && current == OnOff::On {
-				roll_command = Some(roll::Command::SendUp);
+				roll_command = Some(if roll_state != roll::State::Stopped {
+					//in case of moving already first click just stops
+					roll::Command::Stop
+				} else {
+					roll::Command::SendUp
+				});
 			}
 		};
 
-		if let (Some(last), Some(current)) = (switch_roll_down.last_state(), switch_roll_down.state()) {
+		if let (Some(last), Some(current)) =
+			(switch_roll_down.last_state(), switch_roll_down.state())
+		{
 			if last != current && current == OnOff::On {
-				roll_command = Some(roll::Command::SendDown);
+				roll_command = Some(if roll_state == roll::State::Stopped {
+					//in case of moving already first click just stops
+					roll::Command::Stop
+				} else {
+					roll::Command::SendDown
+				});
 			}
 		};
 
-		if let roll_command = Some(roll_command) {
-			match roll.update(roll_command) {
-				roll::State::DrivingUp => {				
-					ssr_roll_down.set_low().unwrap();
-					ssr_roll_up.set_high().unwrap();
-				},
-				roll::State::DrivingDown => {
-					ssr_roll_up.set_low().unwrap();
-					ssr_roll_down.set_high().unwrap();				
-				},
-				roll::State::Stopped => {
-					ssr_roll_up.set_low().unwrap();
-					ssr_roll_down.set_low().unwrap();
-				}
-			}
+		//execute the user command(s):
+		if let Some(roll_command) = roll_command {
+			roll.execute(roll_command);
 		}
 
 		// do not execute the followings too often: (temperature conversion time of the sensors is a lower limit)
