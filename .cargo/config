@@ -11,7 +11,7 @@ rustflags = [
 ]
 
 [target.thumbv7m-none-eabi]
-runner = 'arm-none-eabi-gdb'
+runner = 'arm-none-eabi-gdb -q -x openocd.gdb'
 rustflags = [
   #"-C", "link-arg=-Wl,-Tlink.x",
   #"-C", "link-arg=-nostartfiles",
@@ -20,6 +20,8 @@ rustflags = [
   "-C", "link-arg=-Tlink.x",
   # "-C", "linker=lld",
   # "-Z", "linker-flavor=ld.lld",
+
+  # "-C", "inline-threshold=225" # or 275 - increases inlining - may be needed when optimized for size - see https://rust-embedded.github.io/book/unsorted/speed-vs-size.html
 ]
 
 [target.thumbv7em-none-eabi]
