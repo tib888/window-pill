@@ -48,6 +48,7 @@
 //- berakas elott a csokikat osszerakni!
 //- SSR vezerlo tranyokat forditva kell berakni
 //- tul fenyes az RGB zold ledje, novelni kell a B15 labon levo ellenallast
+//- egy kicsit tul fenyes az RGB kek ledje, novelni kell a B15 labon levo ellenallast
 
 //List of PCB problems
 //- biztositekoknak nincs eleg hely a csoki mellett
@@ -55,6 +56,7 @@
 //- SSR labfurat csokkenteni (mint 100nf)
 //- 100nf labfurat csokkenteni (mint az ellenallasok)
 //- A C3 (470u 16V) nagyobb atmeroju!
+//- pb3-t fel kell szabaditani hogy mukodhessen az itm debugging
 
 //#![deny(unsafe_code)]
 #![no_main]
@@ -62,17 +64,25 @@
 
 use cortex_m;
 
-//#[macro_use]
-use core::num::Wrapping;
-use cortex_m::{iprintln, peripheral::itm::Stim, peripheral::ITM, Peripherals};
+#[cfg(feature = "itm-debug")]
+use cortex_m::iprintln;
+
+#[cfg(feature = "semihosting-debug")]
+use cortex_m_semihosting::hprintln;
+
 use cortex_m_rt::entry;
+
 use embedded_hal::{
 	digital::v2::{InputPin, OutputPin},
 	watchdog::{Watchdog, WatchdogEnable},
 };
 use onewire::{ds18x20::*, temperature::Temperature, *};
 
+#[cfg(not(feature = "itm-debug"))]
 use panic_halt as _;
+#[cfg(feature = "itm-debug")]
+use panic_itm as _;
+
 use room_pill::{
 	ac_sense::AcSense,
 	ac_switch::*,
@@ -84,6 +94,7 @@ use room_pill::{
 	timing::{Ticker, TimeExt},
 };
 
+use stm32f1xx_hal;
 use stm32f1xx_hal::{
 	adc,
 	can::*,
@@ -123,8 +134,6 @@ fn window_unit_main() -> ! {
 	let mut watchdog = IndependentWatchdog::new(dp.IWDG);
 	watchdog.start(stm32f1xx_hal::time::U32Ext::ms(2_000u32));
 
-	//let stim = &mut dp.ITM.stim[0];
-
 	//10 period at 50Hz, 12 period at 60Hz
 	let ac_test_period = TimeExt::us(200_000u32);
 	let one_sec = TimeExt::us(1_000_000u32);
@@ -146,8 +155,11 @@ fn window_unit_main() -> ! {
 		.freeze(&mut flash.acr);
 	watchdog.feed();
 
-	let mut pwr = dp.PWR;
+	let mut cp = cortex_m::Peripherals::take().unwrap();
+	#[cfg(feature = "itm-debug")]
+	let stim = &mut cp.ITM.stim[0];
 
+	let mut pwr = dp.PWR;
 	let mut backup_domain = rcc.bkp.constrain(dp.BKP, &mut rcc.apb1, &mut pwr);
 	// real time clock
 	let _rtc = rtc::Rtc::rtc(dp.RTC, &mut backup_domain);
@@ -165,7 +177,7 @@ fn window_unit_main() -> ! {
 	let mut gpioc = dp.GPIOC.split(&mut rcc.apb2);
 
 	// Disables the JTAG to free up pb3, pb4 and pa15 for normal use
-	let (pa15, pb3, pb4) = afio.mapr.disable_jtag(gpioa.pa15, gpiob.pb3, gpiob.pb4);
+	let (pa15, _pb3_itm_swo, pb4) = afio.mapr.disable_jtag(gpioa.pa15, gpiob.pb3, gpiob.pb4);
 	// -------- Roll control related
 	watchdog.feed();
 
@@ -182,7 +194,7 @@ fn window_unit_main() -> ! {
 	// AC main voltage sense on B1 (ADC9)
 	let mut adc9_ac_main_voltage = gpiob.pb1.into_analog(&mut gpiob.crl);
 	// Photoresistor on B0 (ADC8)
-	let mut _adc8_photo_resistor = gpiob.pb0.into_analog(&mut gpiob.crl);
+	let mut adc8_photo_resistor = gpiob.pb0.into_analog(&mut gpiob.crl);
 
 	// Solid state relay connected to A9 drives the ssr_roll_down (push pull output)
 	let mut ssr_roll_down = gpioa.pa9.into_push_pull_output(&mut gpioa.crh);
@@ -201,9 +213,11 @@ fn window_unit_main() -> ! {
 
 	// Open alarm on A5 (pull down)
 	let open_alarm = gpioa.pa5.into_pull_up_input(&mut gpioa.crl);
+
 	// CAN (RX, TX) on A11, A12
 	let canrx = gpioa.pa11.into_floating_input(&mut gpioa.crh);
 	let cantx = gpioa.pa12.into_alternate_push_pull(&mut gpioa.crh);
+
 	// USB is needed here because it can not be used at the same time as CAN since they share memory:
 	let mut _can = Can::can1(
 		dp.CAN1,
@@ -218,7 +232,6 @@ fn window_unit_main() -> ! {
 
 	// DS18B20 1-wire temperature sensors connected to B4 GPIO
 	let onewire_io = pb4.into_open_drain_output(&mut gpiob.crl);
-	let cp = cortex_m::Peripherals::take().unwrap();
 	let delay = Delay::new(cp.SYST, clocks);
 	let mut one_wire = OneWirePort::new(onewire_io, delay).unwrap();
 
@@ -241,9 +254,11 @@ fn window_unit_main() -> ! {
 		Timer::tim1(dp.TIM1, &clocks, &mut rcc.apb2).pwm(piezzo_pin, &mut afio.mapr, 1.khz()); //pwm::<Tim1NoRemap, _, _, _>
 	piezzo.set_duty(Channel::C1, piezzo.get_max_duty() / 2);
 	piezzo.disable(Channel::C1);
+
 	// Read the NEC IR remote commands on A15 GPIO as input with internal pullup
 	let ir_receiver = pa15.into_pull_up_input(&mut gpioa.crh);
 	let mut receiver = ir::IrReceiver::new();
+
 	// RGB led on PB13, PB14, PB15 as open drain (or push pull) output
 	let mut rgb = RgbLed::new(
 		gpiob.pb13.into_open_drain_output(&mut gpiob.crh),
@@ -256,14 +271,15 @@ fn window_unit_main() -> ! {
 	let mut led = gpioc.pc13.into_open_drain_output(&mut gpioc.crh);
 	led.set_high().unwrap(); //turn off
 
-	// Solid state relay or arbitrary unit can be connected to B6, B7, B8, B9
-	let mut _ssr_0 = gpiob.pb6.into_push_pull_output(&mut gpiob.crl);
-	let mut _ssr_1 = gpiob.pb7.into_push_pull_output(&mut gpiob.crl);
-	let mut _ssr_2 = gpiob.pb8.into_push_pull_output(&mut gpiob.crh);
-	let mut _ssr_3 = gpiob.pb9.into_push_pull_output(&mut gpiob.crh);
+	// arbitrary unit can be connected to B6, B7, B8, B9
+	let mut _b6 = gpiob.pb6.into_push_pull_output(&mut gpiob.crl);
+	let mut _b7 = gpiob.pb7.into_push_pull_output(&mut gpiob.crl);
+	let mut _b8 = gpiob.pb8.into_push_pull_output(&mut gpiob.crh);
+	let mut _b9 = gpiob.pb9.into_push_pull_output(&mut gpiob.crh);
 
 	// B3 not used, connected to the ground
-	let _b3 = pb3.into_pull_down_input(&mut gpiob.crl);
+	//#[cfg(not(feature = "itm-debug"))]
+	let _b3 = _pb3_itm_swo.into_push_pull_output(&mut gpiob.crl);
 
 	// B5 not used, connected to the ground
 	let _b5 = gpiob.pb5.into_pull_down_input(&mut gpiob.crl);
@@ -272,49 +288,55 @@ fn window_unit_main() -> ! {
 	let _b12 = gpiob.pb12.into_pull_down_input(&mut gpiob.crh);
 
 	// C14, C15 used on the bluepill board for 32768Hz xtal
-
 	// -------- Init temperature measurement
-	// watchdog.feed();
+	watchdog.feed();
 
-	// const MAX_THERMOMETER_COUNT: usize = 4; //max number of thermometers
+	const MAX_THERMOMETER_COUNT: usize = 2; //max number of thermometers
 
-	// //store the addresses of temp sensors, start measurement on each:
-	// let mut roms = [[0u8; 8]; MAX_THERMOMETER_COUNT];
-	// let mut count = 0;
+	//store the addresses of temp sensors, start measurement on each:
+	let mut roms = [[0u8; 8]; MAX_THERMOMETER_COUNT];
+	let mut count = 0;
 
-	// let mut it = RomIterator::new(0);
+	let mut it = RomIterator::new(0);
+	let mut lux = Option::<u32>::None;
 
-	// loop {
-	// 	watchdog.feed();
+	loop {
+		watchdog.feed();
 
-	// 	match one_wire.iterate_next(true, &mut it) {
-	// 		Ok(None) => {
-	// 			break; //no or no more devices found -> stop
-	// 		}
+		match one_wire.iterate_next(true, &mut it) {
+			Ok(None) => {
+				break; //no or no more devices found -> stop
+			}
 
-	// 		Ok(Some(rom)) => {
-	// 			if let Some(_device_type) = detect_18x20_devices(rom[0]) {
-	// 				//writeln!(hstdout, "rom: {:?}", &rom).unwrap();
-	// 				roms[count] = *rom;
-	// 				count = count + 1;
-	// 				let _ = one_wire.start_temperature_measurement(&rom);
-	// 				if count >= MAX_THERMOMETER_COUNT {
-	// 					break;
-	// 				}
-	// 			}
-	// 			continue;
-	// 		}
+			Ok(Some(rom)) => {
+				if let Some(_device_type) = detect_18x20_devices(rom[0]) {
+					#[cfg(feature = "semihosting-debug")]
+					hprintln!("rom: {:?}", &rom).unwrap();
 
-	// 		Err(_e) => {
-	// 			rgb.color(Colors::White).unwrap();
-	// 			break;
-	// 		}
-	// 	}
-	// }
-	// //not mutable anymore
-	// let roms = roms;
-	// let count = count;
-	// let mut temperatures = [Option::<Temperature>::None; MAX_THERMOMETER_COUNT];
+					//TODO use this address as unique id on the CAN bus!
+					roms[count] = *rom;
+					count = count + 1;
+					let _ = one_wire.start_temperature_measurement(&rom);
+					if count >= MAX_THERMOMETER_COUNT {
+						break;
+					}
+				}
+				continue;
+			}
+
+			Err(_e) => {
+				rgb.color(Colors::White).unwrap();
+				break;
+			}
+		}
+	}
+
+	//not mutable anymore
+	let roms = roms;
+	let count = count;
+	let mut temperatures = [Option::<Temperature>::None; MAX_THERMOMETER_COUNT];
+
+	rgb.color(Colors::Black).unwrap(); //todo remove
 
 	// -------- Config finished
 	watchdog.feed();
@@ -325,9 +347,6 @@ fn window_unit_main() -> ! {
 
 	let mut last_time = tick.now();
 	let mut last_big_time = last_time;
-
-	rgb.color(Colors::Black).unwrap(); //todo remove
-
 	//main update loop
 	loop {
 		watchdog.feed();
@@ -343,53 +362,6 @@ fn window_unit_main() -> ! {
 		//update the AC switch sensors statemachine:
 		switch_roll_up.update(delta).unwrap();
 		switch_roll_down.update(delta).unwrap();
-
-		let mut driving_power_detected = true;
-
-		//TODO improve to multichanel dma adc
-		//update roll current sensor
-		if let Ok(roll_current) = adc1.read(&mut adc7_roll_motor_current_sense) {
-			watchdog.feed();
-
-			if let Ok(roll_voltage) = adc1.read(&mut adc9_ac_main_voltage) {
-				watchdog.feed();
-
-				roll_power_detector.update(roll_current, roll_voltage, delta);
-
-				if let Some(stat) = roll_power_detector.state() {
-					//iprintln!(stim, "{}", stat.avg_power);
-
-					//onboard led shows the power usage of roll motor: //todo remove?
-					if stat.avg_power > 350 {
-						led.set_low().unwrap();
-					} else {
-						led.set_high().unwrap();
-						driving_power_detected = false;
-					}
-				}
-			}
-		}
-
-		//update the roll statemachine and forward to the executor SSRs:
-		let roll_state = roll.update(delta, driving_power_detected);
-		match roll_state {
-			roll::State::DrivingUp => {
-				ssr_roll_down.set_low().unwrap();
-				ssr_roll_up.set_high().unwrap();
-				rgb.color(Colors::Green).unwrap(); //todo remove?
-			}
-			roll::State::DrivingDown => {
-				ssr_roll_up.set_low().unwrap();
-				ssr_roll_down.set_high().unwrap();
-				rgb.color(Colors::Blue).unwrap(); //todo remove?
-			}
-			roll::State::Stopped => {
-				ssr_roll_up.set_low().unwrap();
-				ssr_roll_down.set_low().unwrap();
-				rgb.color(Colors::Red).unwrap(); //todo remove?
-			}
-		}
-
 		let mut roll_command = None;
 
 		//process the infrared remote inputs:
@@ -397,10 +369,6 @@ fn window_unit_main() -> ! {
 			Ok(ir::NecContent::Repeat) => {}
 			Ok(ir::NecContent::Data(data)) => {
 				let ir_command = translate(data);
-				//write!(hstdout, "{:x}={:?} ", data, command).unwrap();
-				//model.ir_remote_command(command, &MENU);
-				//model.refresh_display(&mut display, &mut backlight);
-
 				roll_command = match ir_command {
 					IrCommands::Up => Some(roll::Command::SendUp),
 					IrCommands::Down => Some(roll::Command::SendDown),
@@ -421,12 +389,12 @@ fn window_unit_main() -> ! {
 			_ => {}
 		};
 
-		//process the AC switch inputs:
+		//process the AC roll up switch input:
 		if switch_roll_up.last_state() == Some(OnOff::Off)
 			&& switch_roll_up.state() == Some(OnOff::On)
 		{
 			//rising edge detected
-			roll_command = if roll_state != roll::State::Stopped {
+			roll_command = if roll.state() != roll::State::Stopped {
 				//in case of moving already first click just stops
 				Some(roll::Command::Stop)
 			} else {
@@ -434,26 +402,18 @@ fn window_unit_main() -> ! {
 			};
 		};
 
+		//process the AC roll down switch input:
 		if switch_roll_down.last_state() == Some(OnOff::Off)
 			&& switch_roll_down.state() == Some(OnOff::On)
 		{
 			//rising edge detected
-			roll_command = if roll_state != roll::State::Stopped {
+			roll_command = if roll.state() != roll::State::Stopped {
 				//in case of moving already first click just stops
 				Some(roll::Command::Stop)
 			} else {
 				Some(roll::Command::SendDown)
 			};
 		};
-
-		if switch_roll_down.last_state() != switch_roll_down.state() {
-			rgb.set(
-				switch_roll_down.last_state() == Some(OnOff::On),
-				false,
-				switch_roll_down.state() == Some(OnOff::On),
-			)
-			.unwrap();
-		}
 
 		//execute the user command(s):
 		if let Some(command) = roll_command {
@@ -462,12 +422,79 @@ fn window_unit_main() -> ! {
 			roll_power_detector.reset();
 		}
 
-		if motion_alarm.is_low() == Ok(true) {
-			//todo send can message
+		if roll.state() != roll::State::Stopped
+			|| ssr_roll_up.is_set_high().unwrap()
+			|| ssr_roll_down.is_set_high().unwrap()
+		{
+			let mut driving_power_detected = true;
+
+			//TODO improve to use multichanel dma adc
+			//update roll current sensor
+			if let Ok(roll_current) = adc1.read(&mut adc7_roll_motor_current_sense) {
+				watchdog.feed();
+
+				if let Ok(roll_voltage) = adc1.read(&mut adc9_ac_main_voltage) {
+					watchdog.feed();
+					roll_power_detector.update(roll_current, roll_voltage, delta);
+
+					if let Some(stat) = roll_power_detector.state() {
+						if stat.avg_power > 350 {
+							//#[cfg(feature = "itm-debug")]
+							//iprintln!(stim, "{}", stat.avg_power);
+
+							if stat.avg_power > 40000 {
+								//overload protection
+								ssr_roll_up.set_low().unwrap();
+								ssr_roll_down.set_low().unwrap();
+								rgb.color(Colors::White).unwrap(); //todo remove?
+								roll.execute(roll::Command::Stop);
+								#[cfg(feature = "itm-debug")]
+								iprintln!(stim, "Roll overload detected: {}", stat.avg_power);
+								#[cfg(feature = "semihosting-debug")]
+								hprintln!("Roll overload detected: {}", stat.avg_power).unwrap();
+							}
+
+							//onboard led shows the power usage of roll motor: //todo remove?
+							led.set_low().unwrap();
+						} else {
+							//onboard led shows the power usage of roll motor: //todo remove?
+							led.set_high().unwrap();
+							driving_power_detected = false;
+						}
+					}
+				}
+			}
+
+			//update the roll statemachine and forward to the executor SSRs:
+			roll.update(delta, driving_power_detected);
+
+			match roll.state() {
+				roll::State::DrivingUp => {
+					ssr_roll_down.set_low().unwrap();
+					ssr_roll_up.set_high().unwrap();
+					rgb.color(Colors::Green).unwrap(); //todo remove?
+				}
+				roll::State::DrivingDown => {
+					ssr_roll_up.set_low().unwrap();
+					ssr_roll_down.set_high().unwrap();
+					rgb.color(Colors::Blue).unwrap(); //todo remove?
+				}
+				roll::State::Stopped => {
+					ssr_roll_up.set_low().unwrap();
+					ssr_roll_down.set_low().unwrap();
+					rgb.color(Colors::Red).unwrap(); //todo remove?
+				}
+			}
 		}
 
-		if open_alarm.is_high() == Ok(true) {
+		if motion_alarm.is_low() == Ok(true) {
 			//todo send can message
+			rgb.color(Colors::Purple).unwrap(); //todo remove?
+		}
+
+		if open_alarm.is_low() == Ok(true) {
+			//todo send can message
+			rgb.color(Colors::Cyan).unwrap(); //todo remove?
 		}
 
 		// do not execute the followings too often: (temperature conversion time of the sensors is a lower limit)
@@ -478,29 +505,57 @@ fn window_unit_main() -> ! {
 		last_big_time = now;
 
 		//read sensors and restart temperature measurement
-		// for i in 0..count {
-		// 	temperatures[i] = match one_wire.read_temperature_measurement_result(&roms[i]) {
-		// 		Ok(temperature) => Some(temperature),
-		// 		Err(_code) => None,
-		// 	};
+		for i in 0..count {
+			temperatures[i] = match one_wire.read_temperature_measurement_result(&roms[i]) {
+				Ok(temperature) => {
+					#[cfg(feature = "semihosting-debug")]
+					hprintln!(
+						"T[{}] = {}.{}",
+						i,
+						temperature.whole_degrees(),
+						temperature.fraction_degrees()
+					)
+					.unwrap();
+					#[cfg(feature = "itm-debug")]
+					iprintln!(
+						stim,
+						"T[{}] = {}.{}",
+						i,
+						temperature.whole_degrees(),
+						temperature.fraction_degrees()
+					);
+					Some(temperature)
+				}
+				Err(_code) => None,
+			};
 
-		// 	let _ = one_wire.start_temperature_measurement(&roms[i]);
-		// }
+			let _ = one_wire.start_temperature_measurement(&roms[i]);
+		}
 
-		//todo send can message
-		//todo receive can temp control
-		//todo control radiator valve?
+		//TODO send can message
+		//TODO receive can temp control
+		//TODO control radiator valve?
 		// adc6_valve_motor_current_sense;
 
-		//todo receive can ring control
-		// let lux: u32 = adc1.read(&mut adc8_photo_resistor).unwrap();
+		//TODO receive can ring control
 		// piezzo.enable(Channel::C1);
 		// piezzo.set_period((lux >> 3).hz());
 
-		// adc7_roll_motor_current_sense;
-		// adc8_photo_resistor;
+		//TODO measure light and send can message in case of change
+		let light: u32 = adc1.read(&mut adc8_photo_resistor).unwrap();
+		if let Some(l) = lux {
+			if l != light {
+				lux = Some(light);
+				//TODO send can message
+			}
+		} else {
+			lux = Some(light);
+		}
 
 		//led.toggle().unwrap();
+
+		#[cfg(feature = "itm-debug")]
+		iprintln!(stim, "Hello!");
 	}
 }
 
