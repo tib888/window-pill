@@ -11,10 +11,6 @@ Cargo.lock
 .#*
 .gdb_history
 Cargo.lock
-*.bat
-stlink-v2.cfg
-stm32f1x.cfg
-.gdbinit
 itm.fifo
 roll_pwr.log
 
@@ -23,3 +19,5 @@ roll_pwr.log
 *.so
 *.rlib
 *.dll
+roll_pwr.log2
+roll_pwr.log3

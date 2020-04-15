@@ -18,23 +18,22 @@ set backtrace limit 32
 # next 4
 # end
 
-break main
-
 monitor arm semihosting enable
 
 # # send captured ITM to the file itm.fifo
 # # (the microcontroller SWO pin must be connected to the programmer SWO pin)
 # # 8000000 must match the core clock frequency
-monitor tpiu config internal itm.fifo COM5 off 72000000 2000000
+monitor tpiu config internal itm.fifo COM7 off 72000000 2000000
 
 # # OR: make the microcontroller SWO pin output compatible with UART (8N1)
 # # 8000000 must match the core clock frequency
 # # 2000000 is the frequency of the SWO pin
-# monitor tpiu config external COM5 off 72000000 2000000
+# monitor tpiu config external COM7 off 72000000 2000000
 
 # # enable ITM port 0
-monitor itm port 0 on
-
+# monitor itm port 0 on
+   
+break main
 load
 
 # # start the process but immediately halt the processor

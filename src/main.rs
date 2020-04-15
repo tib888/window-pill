@@ -49,6 +49,7 @@
 //- SSR vezerlo tranyokat forditva kell berakni
 //- tul fenyes az RGB zold ledje, novelni kell a B15 labon levo ellenallast
 //- egy kicsit tul fenyes az RGB kek ledje, novelni kell a B15 labon levo ellenallast
+//- 220as kapcsolo vagy valami nagyon zavarerzekeny... 1M-nal kisebb elenallast v. kondit?
 
 //List of PCB problems
 //- biztositekoknak nincs eleg hely a csoki mellett
@@ -57,6 +58,9 @@
 //- 100nf labfurat csokkenteni (mint az ellenallasok)
 //- A C3 (470u 16V) nagyobb atmeroju!
 //- pb3-t fel kell szabaditani hogy mukodhessen az itm debugging
+//- a CAN lezaras tuajdonkepp lehagyhato a nyakrol
+//- SMD ?
+//- RGB led labait cikk-cakk-ba?
 
 //#![deny(unsafe_code)]
 #![no_main]
@@ -65,7 +69,7 @@
 use cortex_m;
 
 #[cfg(feature = "itm-debug")]
-use cortex_m::iprintln;
+use cortex_m::{iprint, iprintln};
 
 #[cfg(feature = "semihosting-debug")]
 use cortex_m_semihosting::hprintln;
@@ -82,6 +86,8 @@ use onewire::{ds18x20::*, temperature::Temperature, *};
 use panic_halt as _;
 #[cfg(feature = "itm-debug")]
 use panic_itm as _;
+
+//use numtoa::NumToA;
 
 use room_pill::{
 	ac_sense::AcSense,
@@ -102,9 +108,12 @@ use stm32f1xx_hal::{
 	prelude::*,
 	pwm::{Channel, Pwm},
 	rtc,
+	serial::{Config, Serial},
 	timer::Timer,
 	watchdog::IndependentWatchdog,
 };
+
+//use core::fmt::Write;
 
 type Duration = room_pill::timing::Duration<u32, room_pill::timing::MicroSeconds>;
 
@@ -170,6 +179,8 @@ fn window_unit_main() -> ! {
 	watchdog.feed();
 
 	let mut afio = dp.AFIO.constrain(&mut rcc.apb2);
+
+	//let _dma_channels = dp.DMA1.split(&mut rcc.ahb);
 
 	//configure pins:
 	let mut gpioa = dp.GPIOA.split(&mut rcc.apb2);
@@ -271,9 +282,23 @@ fn window_unit_main() -> ! {
 	let mut led = gpioc.pc13.into_open_drain_output(&mut gpioc.crh);
 	led.set_high().unwrap(); //turn off
 
+	// USART1
+	// let tx = gpiob.pb6.into_alternate_push_pull(&mut gpiob.crl);
+	// let rx = gpiob.pb7;
+	// let serial = Serial::usart1(
+	// 	dp.USART1,
+	// 	(tx, rx),
+	// 	&mut afio.mapr,
+	// 	Config::default().baudrate(2_000_000.bps()),
+	// 	clocks,
+	// 	&mut rcc.apb2,
+	// );
+	// let (mut _tx, _rx) = serial.split();
+	//let _tx_dma = tx.with_dma(dma_channels.4);
+
 	// arbitrary unit can be connected to B6, B7, B8, B9
-	let mut _b6 = gpiob.pb6.into_push_pull_output(&mut gpiob.crl);
-	let mut _b7 = gpiob.pb7.into_push_pull_output(&mut gpiob.crl);
+	//let mut _b6 = gpiob.pb6.into_push_pull_output(&mut gpiob.crl);
+	//let mut _b7 = gpiob.pb7.into_push_pull_output(&mut gpiob.crl);
 	let mut _b8 = gpiob.pb8.into_push_pull_output(&mut gpiob.crh);
 	let mut _b9 = gpiob.pb9.into_push_pull_output(&mut gpiob.crh);
 
@@ -310,8 +335,8 @@ fn window_unit_main() -> ! {
 
 			Ok(Some(rom)) => {
 				if let Some(_device_type) = detect_18x20_devices(rom[0]) {
-					#[cfg(feature = "semihosting-debug")]
-					hprintln!("rom: {:?}", &rom).unwrap();
+					//#[cfg(feature = "semihosting-debug")]
+					//hprintln!("rom: {:?}", &rom).unwrap();
 
 					//TODO use this address as unique id on the CAN bus!
 					roms[count] = *rom;
@@ -440,7 +465,13 @@ fn window_unit_main() -> ! {
 					if let Some(stat) = roll_power_detector.state() {
 						if stat.avg_power > 350 {
 							//#[cfg(feature = "itm-debug")]
-							//iprintln!(stim, "{}", stat.avg_power);
+							//iprint!(stim, "{}\n\r", stat.avg_power);
+							//serial.write((stat.avg_power & 255) as u8).unwrap();
+							//serial.write(((stat.avg_power >> 8) & 255) as u8).unwrap();
+							//writeln!(tx, "{:X}", stat.avg_power as i16).unwrap();							
+							//let (_, _tx_dma) = tx_dma.write(&mut BUFFER).wait();
+							//let mut buffer = [0u8; 12];
+							//stat.avg_power.numtoa(10, &mut buffer).iter().for_each(|c| tx.write(*c).unwrap());
 
 							if stat.avg_power > 40000 {
 								//overload protection
@@ -448,10 +479,10 @@ fn window_unit_main() -> ! {
 								ssr_roll_down.set_low().unwrap();
 								rgb.color(Colors::White).unwrap(); //todo remove?
 								roll.execute(roll::Command::Stop);
-								#[cfg(feature = "itm-debug")]
-								iprintln!(stim, "Roll overload detected: {}", stat.avg_power);
-								#[cfg(feature = "semihosting-debug")]
-								hprintln!("Roll overload detected: {}", stat.avg_power).unwrap();
+								// #[cfg(feature = "itm-debug")]
+								// iprintln!(stim, "Roll overload detected: {}", stat.avg_power);
+								// #[cfg(feature = "semihosting-debug")]
+								// hprintln!("Roll overload detected: {}", stat.avg_power).unwrap();
 							}
 
 							//onboard led shows the power usage of roll motor: //todo remove?
@@ -508,22 +539,22 @@ fn window_unit_main() -> ! {
 		for i in 0..count {
 			temperatures[i] = match one_wire.read_temperature_measurement_result(&roms[i]) {
 				Ok(temperature) => {
-					#[cfg(feature = "semihosting-debug")]
-					hprintln!(
-						"T[{}] = {}.{}",
-						i,
-						temperature.whole_degrees(),
-						temperature.fraction_degrees()
-					)
-					.unwrap();
-					#[cfg(feature = "itm-debug")]
-					iprintln!(
-						stim,
-						"T[{}] = {}.{}",
-						i,
-						temperature.whole_degrees(),
-						temperature.fraction_degrees()
-					);
+					// #[cfg(feature = "semihosting-debug")]
+					// hprintln!(
+					// 	"T[{}] = {}.{}",
+					// 	i,
+					// 	temperature.whole_degrees(),
+					// 	temperature.fraction_degrees()
+					// )
+					// .unwrap();
+					// #[cfg(feature = "itm-debug")]
+					// iprintln!(
+					// 	stim,
+					// 	"T[{}] = {}.{}",
+					// 	i,
+					// 	temperature.whole_degrees(),
+					// 	temperature.fraction_degrees()
+					// );
 					Some(temperature)
 				}
 				Err(_code) => None,
@@ -554,8 +585,8 @@ fn window_unit_main() -> ! {
 
 		//led.toggle().unwrap();
 
-		#[cfg(feature = "itm-debug")]
-		iprintln!(stim, "Hello!");
+		//#[cfg(feature = "itm-debug")]
+		//iprintln!(stim, "Hello!");
 	}
 }
 
