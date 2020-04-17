@@ -12,9 +12,7 @@ rem * 	openocd -f "stlink-v2.cfg" -f "stm32f1x.cfg"
 rem * Then loads the binary on the HW and executes it.
 
 rem set HOME=%HOMEPATH%
-rem mode COM7 BAUD=2000000 PARITY=0 DATA=8
+rem set HOME=%USERPROFILE%
 rem itmdump -f itm.fifo -s 0
 
-rem set HOME=%USERPROFILE%
-itmdump -f d:\_epinfo.rust\window-pill\itm.fifo -s 0
 cargo run --release --target thumbv7m-none-eabi

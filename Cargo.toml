@@ -10,7 +10,7 @@ version = "0.1.0"
 edition = "2018"
 
 [features]
-default = ["itm-debug"] #, "semihosting-debug" ] 
+default = [] # ["semihosting-debug" ] # [ "itm-debug"] #
 itm-debug = []
 semihosting-debug = []
 
@@ -26,29 +26,15 @@ numtoa = "0.2.3"
 # heapless = "0.5.1"
 # owned-singleton = "0.1.0"
 
-# [dependencies.num-traits]
-# version = "0.2.8"
-# default-features = false
-
 [dependencies.embedded-hal]
 version = "0.2.3"
 features = ["unproven"]
-
-# [dependencies.cortex-m-rtfm]
-# git = "https://github.com/japaric/cortex-m-rtfm"
-# features = ["timer-queue"]
-# version="0.5.0-alpha.1"
-
-# [dependencies.stm32f103xx]
-# features = ["rt"]
-# version = "0.11.0"
 
 [dependencies.stm32f1xx-hal]
 # git = "https://github.com/tib888/stm32f1xx-hal"
 path = "../stm32f1xx-hal"
 version = "0.5.3"
 features = ["stm32f103", "medium"] #, "rt"
-
 
 [dependencies.onewire]
 # git = "https://github.com/tib888/onewire"

@@ -50,6 +50,11 @@
 //- tul fenyes az RGB zold ledje, novelni kell a B15 labon levo ellenallast
 //- egy kicsit tul fenyes az RGB kek ledje, novelni kell a B15 labon levo ellenallast
 //- 220as kapcsolo vagy valami nagyon zavarerzekeny... 1M-nal kisebb elenallast v. kondit?
+//- ? B10, B11 szelepmotor vezerlot atrakni esetleg pwm pinekre ? pl. rakotni B8..B9-re is, a B10,11 pedig akkor dummy input lesz
+//- B6, B7 COM portnak legyen fenntartva...
+//- riaszto bementet ne legyen az 5v tapra kotve! akkor mar inkabba 12-re
+//- 20k-ra novelni az optocsatolo ledjenek elotetellenallasat!
+//- optocsatolo helyett lehet jobb lenne nagy bemeno ellenallasok + 2 vedodioda
 
 //List of PCB problems
 //- biztositekoknak nincs eleg hely a csoki mellett
@@ -62,42 +67,47 @@
 //- SMD ?
 //- RGB led labait cikk-cakk-ba?
 
+//Termosztat bekotes
+//vastag piros: elem +
+//vastag fekete: elem -
+//piros -> motor piros
+//feher -> motor fekete
+//sarga <- vezerles fekete
+//zold <- vezerles piros
+
+//Mozgaserzekelo bekotes:
+//narancs: +9..+16V
+//narance feher : fold
+//zoldek: NC mozgas
+//etc nincs bekotve, tamper sem 
+
 //#![deny(unsafe_code)]
 #![no_main]
 #![no_std]
 
-use cortex_m;
+mod valve;
 
-#[cfg(feature = "itm-debug")]
-use cortex_m::{iprint, iprintln};
-
-#[cfg(feature = "semihosting-debug")]
-use cortex_m_semihosting::hprintln;
-
-use cortex_m_rt::entry;
-
-use embedded_hal::{
-	digital::v2::{InputPin, OutputPin},
-	watchdog::{Watchdog, WatchdogEnable},
-};
-use onewire::{ds18x20::*, temperature::Temperature, *};
+use core::fmt::Write;
 
 #[cfg(not(feature = "itm-debug"))]
 use panic_halt as _;
 #[cfg(feature = "itm-debug")]
 use panic_itm as _;
 
+use cortex_m;
+
+#[cfg(feature = "itm-debug")]
+use cortex_m::{iprint, iprintln};
+#[cfg(feature = "semihosting-debug")]
+use cortex_m_semihosting::hprintln;
+
+use cortex_m_rt::entry; 
+
 //use numtoa::NumToA;
 
-use room_pill::{
-	ac_sense::AcSense,
-	ac_switch::*,
-	ir,
-	ir::NecReceiver,
-	ir_remote::*,
-	rgb::{Colors, RgbLed},
-	roll,
-	timing::{Ticker, TimeExt},
+use embedded_hal::{
+	digital::v2::{InputPin, OutputPin},
+	watchdog::{Watchdog, WatchdogEnable},
 };
 
 use stm32f1xx_hal;
@@ -109,18 +119,30 @@ use stm32f1xx_hal::{
 	pwm::{Channel, Pwm},
 	rtc,
 	serial::{Config, Serial},
+	//time::{Instant, MicroSeconds, MonoTimer},
 	timer::Timer,
 	watchdog::IndependentWatchdog,
 };
 
-//use core::fmt::Write;
+use room_pill::{
+	ac_sense::AcSense,
+	ac_switch::*,
+	ir,
+	ir::NecReceiver,
+	ir_remote::*,
+	rgb::{Colors, RgbLed},
+	roll,
+	timing::{Ticker, TimeExt},
+};
+use onewire::{ds18x20::*, temperature::Temperature, *};
+use valve::Valve;
 
 type Duration = room_pill::timing::Duration<u32, room_pill::timing::MicroSeconds>;
 
 /// pos should be in [0..9] range
 fn roll_to(roll: &roll::Roll<Duration>, pos: u32) -> Option<roll::Command<Duration>> {
-	if let &Some(max) = roll.bottom() {
-		Some(roll::Command::SendTo(max * pos / 13)) //theoretically /9 but about at the last 30% it is closed
+	if let &Some(max) = roll.maximum() {
+		Some(roll::Command::SetPosition(max * pos / 13)) //theoretically /9 but about at the last 30% it is closed
 	} else {
 		None
 	}
@@ -139,20 +161,20 @@ fn main() -> ! {
 }
 
 fn window_unit_main() -> ! {
-	let dp = stm32f1xx_hal::pac::Peripherals::take().unwrap();
-	let mut watchdog = IndependentWatchdog::new(dp.IWDG);
+	let device = stm32f1xx_hal::pac::Peripherals::take().unwrap();
+	let mut watchdog = IndependentWatchdog::new(device.IWDG);
 	watchdog.start(stm32f1xx_hal::time::U32Ext::ms(2_000u32));
 
 	//10 period at 50Hz, 12 period at 60Hz
-	let ac_test_period = TimeExt::us(200_000u32);
-	let one_sec = TimeExt::us(1_000_000u32);
+	let ac_test_period = TimeExt::us(200_000);
+	let one_sec = TimeExt::us(1_000_000);
 
-	let mut flash = dp.FLASH.constrain();
+	let mut flash = device.FLASH.constrain();
 
 	//flash.acr.prftbe().enabled();//?? Configure Flash prefetch - Prefetch buffer is not available on value line devices
 	//scb().set_priority_grouping(NVIC_PRIORITYGROUP_4);
 
-	let mut rcc = dp.RCC.constrain();
+	let mut rcc = device.RCC.constrain();
 	let clocks = rcc
 		.cfgr
 		.use_hse(8.mhz())
@@ -164,28 +186,28 @@ fn window_unit_main() -> ! {
 		.freeze(&mut flash.acr);
 	watchdog.feed();
 
-	let mut cp = cortex_m::Peripherals::take().unwrap();
+	let mut core = cortex_m::Peripherals::take().unwrap();
 	#[cfg(feature = "itm-debug")]
-	let stim = &mut cp.ITM.stim[0];
+	let stim = &mut core.ITM.stim[0];
 
-	let mut pwr = dp.PWR;
-	let mut backup_domain = rcc.bkp.constrain(dp.BKP, &mut rcc.apb1, &mut pwr);
+	let mut pwr = device.PWR;
+	let mut backup_domain = rcc.bkp.constrain(device.BKP, &mut rcc.apb1, &mut pwr);
 	// real time clock
-	let _rtc = rtc::Rtc::rtc(dp.RTC, &mut backup_domain);
+	let _rtc = rtc::Rtc::rtc(device.RTC, &mut backup_domain);
 
 	// A/D converter
-	let mut adc1 = adc::Adc::adc1(dp.ADC1, &mut rcc.apb2, clocks);
+	let mut adc1 = adc::Adc::adc1(device.ADC1, &mut rcc.apb2, clocks);
 
 	watchdog.feed();
 
-	let mut afio = dp.AFIO.constrain(&mut rcc.apb2);
+	let mut afio = device.AFIO.constrain(&mut rcc.apb2);
 
-	//let _dma_channels = dp.DMA1.split(&mut rcc.ahb);
+	//let _dma_channels = device.DMA1.split(&mut rcc.ahb);
 
 	//configure pins:
-	let mut gpioa = dp.GPIOA.split(&mut rcc.apb2);
-	let mut gpiob = dp.GPIOB.split(&mut rcc.apb2);
-	let mut gpioc = dp.GPIOC.split(&mut rcc.apb2);
+	let mut gpioa = device.GPIOA.split(&mut rcc.apb2);
+	let mut gpiob = device.GPIOB.split(&mut rcc.apb2);
+	let mut gpioc = device.GPIOC.split(&mut rcc.apb2);
 
 	// Disables the JTAG to free up pb3, pb4 and pa15 for normal use
 	let (pa15, _pb3_itm_swo, pb4) = afio.mapr.disable_jtag(gpioa.pa15, gpiob.pb3, gpiob.pb4);
@@ -214,7 +236,7 @@ fn window_unit_main() -> ! {
 	let mut ssr_roll_up = gpioa.pa10.into_push_pull_output(&mut gpioa.crh);
 
 	let mut roll = roll::Roll::<Duration>::new();
-	let mut roll_power_detector = AcSense::new(ac_test_period, true); //0.1sec to be able to wait the first current measurement at motor start
+	let mut roll_power_detector = AcSense::<Duration>::new(ac_test_period, true); //0.1sec to be able to wait the first current measurement at motor start
 
 	// -------- Alarm related
 	watchdog.feed();
@@ -231,30 +253,34 @@ fn window_unit_main() -> ! {
 
 	// USB is needed here because it can not be used at the same time as CAN since they share memory:
 	let mut _can = Can::can1(
-		dp.CAN1,
+		device.CAN1,
 		(cantx, canrx),
 		&mut afio.mapr,
 		&mut rcc.apb1,
-		dp.USB,
+		device.USB,
 	);
 
 	// -------- Heating control related:
 	watchdog.feed();
 
-	// DS18B20 1-wire temperature sensors connected to B4 GPIO
-	let onewire_io = pb4.into_open_drain_output(&mut gpiob.crl);
-	let delay = Delay::new(cp.SYST, clocks);
-	let mut one_wire = OneWirePort::new(onewire_io, delay).unwrap();
+	let mut valve = Valve::new(
+		one_sec,
+		gpiob.pb10.into_push_pull_output(&mut gpiob.crh),
+		gpiob.pb11.into_push_pull_output(&mut gpiob.crh),
+	);
+
+	// A6 - ADC6 valve motor driver current sense shunt
+	let mut valve_motor_current_sense = gpioa.pa6.into_analog(&mut gpioa.crl);
 
 	// Radiator valve motor sense on A0, A1 (floating or pull down input)
-	let _valve_sense_a = gpioa.pa0.into_floating_input(&mut gpioa.crl);
-	let _valve_sense_b = gpioa.pa1.into_floating_input(&mut gpioa.crl);
-	// A6 - ADC6 valve motor driver current sense shunt
-	let mut _adc6_valve_motor_current_sense = gpioa.pa6.into_analog(&mut gpioa.crl);
-
-	// Radiator valve motor driver on B10, B11 (push pull output, pwm?)
-	let mut _valve_motor_drive_a = gpiob.pb10.into_push_pull_output(&mut gpiob.crh);
-	let mut _valve_motor_drive_b = gpiob.pb11.into_push_pull_output(&mut gpiob.crh);
+	//to see what the thermostat does by itself
+	let _sense_a = gpioa.pa0.into_floating_input(&mut gpioa.crl);
+	let _sense_b = gpioa.pa1.into_floating_input(&mut gpioa.crl);
+	
+	// DS18B20 1-wire temperature sensors connected to B4 GPIO
+	let onewire_io = pb4.into_open_drain_output(&mut gpiob.crl);
+	let delay = Delay::new(core.SYST, clocks);
+	let mut one_wire = OneWirePort::new(onewire_io, delay).unwrap();
 
 	// -------- Generic user interface related
 	watchdog.feed();
@@ -262,7 +288,7 @@ fn window_unit_main() -> ! {
 	// Optional piezzo speaker on A8 (open drain output)
 	let piezzo_pin = gpioa.pa8.into_alternate_push_pull(&mut gpioa.crh); //TODO into_alternate_open_drain
 	let mut piezzo =
-		Timer::tim1(dp.TIM1, &clocks, &mut rcc.apb2).pwm(piezzo_pin, &mut afio.mapr, 1.khz()); //pwm::<Tim1NoRemap, _, _, _>
+		Timer::tim1(device.TIM1, &clocks, &mut rcc.apb2).pwm(piezzo_pin, &mut afio.mapr, 1.khz()); //pwm::<Tim1NoRemap, _, _, _>
 	piezzo.set_duty(Channel::C1, piezzo.get_max_duty() / 2);
 	piezzo.disable(Channel::C1);
 
@@ -282,18 +308,19 @@ fn window_unit_main() -> ! {
 	let mut led = gpioc.pc13.into_open_drain_output(&mut gpioc.crh);
 	led.set_high().unwrap(); //turn off
 
-	// USART1
-	// let tx = gpiob.pb6.into_alternate_push_pull(&mut gpiob.crl);
-	// let rx = gpiob.pb7;
-	// let serial = Serial::usart1(
-	// 	dp.USART1,
-	// 	(tx, rx),
-	// 	&mut afio.mapr,
-	// 	Config::default().baudrate(2_000_000.bps()),
-	// 	clocks,
-	// 	&mut rcc.apb2,
-	// );
-	// let (mut _tx, _rx) = serial.split();
+	//USART1
+	let tx = gpiob.pb6.into_alternate_push_pull(&mut gpiob.crl);
+	let rx = gpiob.pb7;
+	let serial = Serial::usart1(
+		device.USART1,
+		(tx, rx),
+		&mut afio.mapr,
+		Config::default().baudrate(2_000_000.bps()),
+		clocks,
+		&mut rcc.apb2,
+	);
+	let (mut tx, rx) = serial.split();
+
 	//let _tx_dma = tx.with_dma(dma_channels.4);
 
 	// arbitrary unit can be connected to B6, B7, B8, B9
@@ -303,7 +330,9 @@ fn window_unit_main() -> ! {
 	let mut _b9 = gpiob.pb9.into_push_pull_output(&mut gpiob.crh);
 
 	// B3 not used, connected to the ground
-	//#[cfg(not(feature = "itm-debug"))]
+	#[cfg(not(feature = "itm-debug"))]
+	let _b3 = _pb3_itm_swo.into_pull_down_input(&mut gpiob.crl);
+	#[cfg(feature = "itm-debug")]
 	let _b3 = _pb3_itm_swo.into_push_pull_output(&mut gpiob.crl);
 
 	// B5 not used, connected to the ground
@@ -365,13 +394,14 @@ fn window_unit_main() -> ! {
 
 	// -------- Config finished
 	watchdog.feed();
-
-	let tick = Ticker::new(cp.DWT, cp.DCB, clocks);
+	let tick = Ticker::new(core.DWT, core.DCB, clocks);
+	//let tick = MonoTimer::new(core.DWT, clocks); //core.DCB,
 
 	//todo beep(piezzo, 440, 100);
 
 	let mut last_time = tick.now();
 	let mut last_big_time = last_time;
+
 	//main update loop
 	loop {
 		watchdog.feed();
@@ -382,12 +412,13 @@ fn window_unit_main() -> ! {
 		last_time = now;
 
 		//update the IR receiver statemachine:
-		let ir_cmd = receiver.receive(now, ir_receiver.is_low().unwrap(), |a, b| tick.to_us(a - b));
+		let ir_cmd = receiver.receive(ir_receiver.is_low().unwrap(), now, |last| tick.to_us(now - last).into());
 
 		//update the AC switch sensors statemachine:
 		switch_roll_up.update(delta).unwrap();
 		switch_roll_down.update(delta).unwrap();
 		let mut roll_command = None;
+		let mut valve_command = None;
 
 		//process the infrared remote inputs:
 		match ir_cmd {
@@ -395,10 +426,10 @@ fn window_unit_main() -> ! {
 			Ok(ir::NecContent::Data(data)) => {
 				let ir_command = translate(data);
 				roll_command = match ir_command {
-					IrCommands::Up => Some(roll::Command::SendUp),
-					IrCommands::Down => Some(roll::Command::SendDown),
+					IrCommands::Up => Some(roll::Command::Open),
+					IrCommands::Down => Some(roll::Command::Close),
 					IrCommands::Ok => Some(roll::Command::Stop),
-					IrCommands::N0 => Some(roll::Command::SendUp),
+					IrCommands::N0 => Some(roll::Command::Open),
 					IrCommands::N1 => roll_to(&roll, 1),
 					IrCommands::N2 => roll_to(&roll, 2),
 					IrCommands::N3 => roll_to(&roll, 3),
@@ -407,9 +438,14 @@ fn window_unit_main() -> ! {
 					IrCommands::N6 => roll_to(&roll, 6),
 					IrCommands::N7 => roll_to(&roll, 7),
 					IrCommands::N8 => roll_to(&roll, 8),
-					IrCommands::N9 => roll_to(&roll, 9), //Some(roll::Command::SendDown),
+					IrCommands::N9 => roll_to(&roll, 9), //Some(roll::Command::Close),
 					_ => None,
-				}
+				};
+				valve_command = match ir_command {
+					IrCommands::Left => Some(valve::Command::Regular(roll::Command::Open)),
+					IrCommands::Right => Some(valve::Command::Regular(roll::Command::Close)),
+					_ => None,
+				};
 			}
 			_ => {}
 		};
@@ -423,7 +459,7 @@ fn window_unit_main() -> ! {
 				//in case of moving already first click just stops
 				Some(roll::Command::Stop)
 			} else {
-				Some(roll::Command::SendUp)
+				Some(roll::Command::Open)
 			};
 		};
 
@@ -436,7 +472,7 @@ fn window_unit_main() -> ! {
 				//in case of moving already first click just stops
 				Some(roll::Command::Stop)
 			} else {
-				Some(roll::Command::SendDown)
+				Some(roll::Command::Close)
 			};
 		};
 
@@ -468,7 +504,7 @@ fn window_unit_main() -> ! {
 							//iprint!(stim, "{}\n\r", stat.avg_power);
 							//serial.write((stat.avg_power & 255) as u8).unwrap();
 							//serial.write(((stat.avg_power >> 8) & 255) as u8).unwrap();
-							//writeln!(tx, "{:X}", stat.avg_power as i16).unwrap();							
+							//writeln!(tx, "{:X}", stat.avg_power as i16).unwrap();
 							//let (_, _tx_dma) = tx_dma.write(&mut BUFFER).wait();
 							//let mut buffer = [0u8; 12];
 							//stat.avg_power.numtoa(10, &mut buffer).iter().for_each(|c| tx.write(*c).unwrap());
@@ -500,12 +536,12 @@ fn window_unit_main() -> ! {
 			roll.update(delta, driving_power_detected);
 
 			match roll.state() {
-				roll::State::DrivingUp => {
+				roll::State::Opening => {
 					ssr_roll_down.set_low().unwrap();
 					ssr_roll_up.set_high().unwrap();
 					rgb.color(Colors::Green).unwrap(); //todo remove?
 				}
-				roll::State::DrivingDown => {
+				roll::State::Closing => {
 					ssr_roll_up.set_low().unwrap();
 					ssr_roll_down.set_high().unwrap();
 					rgb.color(Colors::Blue).unwrap(); //todo remove?
@@ -518,13 +554,25 @@ fn window_unit_main() -> ! {
 			}
 		}
 
-		if motion_alarm.is_low() == Ok(true) {
-			//todo send can message
+		//execute the user command(s):
+		if let Some(command) = valve_command {
+			valve.command(command);
+		}
+		let current: u16 = adc1.read(&mut valve_motor_current_sense).unwrap();
+		// #[cfg(feature = "itm-debug")]
+		// iprint!(stim, "{}", current);
+		//#[cfg(feature = "semihosting-debug")]
+		//hprintln!("{}", current).unwrap();
+		//write!(tx, "{}\n\r", current).unwrap();
+		valve.update(delta, current > 300);
+		
+		if motion_alarm.is_high() == Ok(true) {
+			//todo send can message on rising edges
 			rgb.color(Colors::Purple).unwrap(); //todo remove?
 		}
 
-		if open_alarm.is_low() == Ok(true) {
-			//todo send can message
+		if open_alarm.is_high() == Ok(true) {
+			//todo send can message on rising edges
 			rgb.color(Colors::Cyan).unwrap(); //todo remove?
 		}
 
@@ -586,7 +634,9 @@ fn window_unit_main() -> ! {
 		//led.toggle().unwrap();
 
 		//#[cfg(feature = "itm-debug")]
-		//iprintln!(stim, "Hello!");
+		//iprintln!(stim, "The quick brown fox jumped over the lazy dog.");
+
+		//write!(tx, "The quick brown fox jumped over the lazy dog.\n\r").unwrap();
 	}
 }
 
