@@ -19,5 +19,6 @@ roll_pwr.log
 *.so
 *.rlib
 *.dll
-roll_pwr.log2
-roll_pwr.log3
+
+# Logs
+debug.*
