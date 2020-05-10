@@ -43,74 +43,9 @@
 //! C14, C15 used on the bluepill board for 32768Hz xtal
 //!
 
-//SW TODO
-// can lezarasok
-// miert villog a mozgaserzekelo mindig? - alacsony volt a fesz
-
-//List of HW problem
-//- tapokat elore beallitani 5V-ra!
-//- a modulok es a nyak kozott legyen res!
-//- berakas elott a csokikat osszerakni!
-//- SSR vezerlo tranyokat forditva kell berakni
-//- tul fenyes az RGB zold ledje, novelni kell a B15 labon levo ellenallast 2k .. 2.2- kra
-//- egy kicsit tul fenyes az RGB kek ledje, novelni kell a B14 labon levo ellenallast 2k2 .. 2k7-re
-//- 220as kapcsolo vagy valami nagyon zavarerzekeny... 1M-nal kisebb elenallast v. kondit?
-//- ? B10, B11 szelepmotor vezerlot atrakni esetleg pwm pinekre ? pl. rakotni B8..B9-re is, a B10,11 pedig akkor dummy input lesz
-//- B6, B7 COM portnak legyen fenntartva...
-//- riaszto bementet ne legyen az 5v tapra kotve! akkor mar inkabba 12-re
-//- 20k-ra novelni az optocsatolo ledjenek elotetellenallasat!
-//- optocsatolo helyett lehet jobb lenne nagy bemeno ellenallasok + 2 vedodioda
-//- tulfesz vedo diodakat rakni a can busz es a fold koze?
-//- A DOOR UNITBAN ROSZ A CAN MEGHAJTO IC ado oldala => CSERE volt!
-
-//List of PCB problems
-//- biztositekoknak nincs eleg hely a csoki mellett
-//- SSR labtavot novelni
-//- SSR labfurat csokkenteni (mint 100nf)
-//- 100nf labfurat csokkenteni (mint az ellenallasok)
-//- A C3 (470u 16V) nagyobb atmeroju!
-//- pb3-t fel kell szabaditani hogy mukodhessen az itm debugging
-//- a CAN lezaras tuajdonkepp lehagyhato a nyakrol
-//- SMD ?
-//- RGB led labait cikk-cakk-ba?
-
-//Termosztat bekotes
-//vastag piros: elem +
-//vastag fekete: elem -
-//piros -> motor piros
-//feher -> motor fekete
-//sarga <- vezerles fekete
-//zold <- vezerles piros
-
-//Mozgaserzekelo bekotes:
-//narancs: +9..+16V
-//narance feher : fold
-//zoldek: NC mozgas
-//etc nincs bekotve, tamper sem
-
-//door1   Unique ID: 50ff6c065177535424281587 [40, 97, 100, 18, 46, 79, 94, 252]
-
-//                   **                   ****   
-// 0: Unique ID: 77  4D 49ff72067189505752420767 [40, 142, 63, 191, 4, 0, 0, 153]   
-// 1: Unique ID: 64  40 50ff73067285495719181567 [40, 187, 102, 191, 4, 0, 0, 249]
-// 2: Unique ID: 237 ED 54ff76067572545621542167 [40, 97, 100, 18, 47, 177, 25, 215]
-// 3: Unique ID: 233 E9 54ff70067572545651232467 [40, 43, 24, 192, 4, 0, 0, 181]
-// 4: Unique ID: 239 EF 54ff6c067572545649212467 [40, 137, 208, 191, 4, 0, 0, 169]
-
-// 5: Unique ID: 209 D1 54ff72067572545608402467 [0, 0, 0, 0, 0, 0, 0, 0]
-// 6: Unique ID: 131 83 54ff6d067572545612172467 [0, 0, 0, 0, 0, 0, 0, 0]
-// 7: Unique ID: 172 AC 54ff73067572545621102167 [0, 0, 0, 0, 0, 0, 0, 0]
-// 8: Unique ID: 133 85 55ff6b067572545626262067 [0, 0, 0, 0, 0, 0, 0, 0]
-// 9: Unique ID: 215 D7 54ff6a067572545640162467 [0, 0, 0, 0, 0, 0, 0, 0]	//switch
-
 //#![deny(unsafe_code)]
 #![no_main]
 #![no_std]
-
-pub mod beeper;
-pub mod heating;
-pub mod roll;
-pub mod shutter;
 
 use panic_halt as _;
 
@@ -118,9 +53,7 @@ use cortex_m;
 use cortex_m_rt::{entry, exception, ExceptionFrame};
 
 use embedded_hal::{
-	digital::v2::{InputPin, OutputPin},
-	watchdog::{Watchdog, WatchdogEnable},
-	PwmPin,
+	digital::v2::{InputPin, OutputPin},	
 };
 
 use stm32f1xx_hal;
@@ -132,14 +65,16 @@ use stm32f1xx_hal::{
 	pwm::Channel,
 	rtc,
 	serial::{Config, Serial},
-	timer::{Tim4NoRemap, Timer},
-	watchdog::IndependentWatchdog,
+	timer::Timer,	
 };
 
-use beeper::Beeper;
-use heating::MotorPin;
-use heating::Valve;
-use onewire::{ds18x20::*, temperature::Temperature, *};
+use window_pill::{
+	beeper::Beeper,
+	shutter,
+	shutter::Shutter,
+};
+
+use onewire::{ds18x20::*, *};
 use room_pill::{
 	ac_sense::AcSense,
 	ac_switch::*,
@@ -147,128 +82,25 @@ use room_pill::{
 	ir::NecReceiver,
 	ir_remote::*,
 	messenger::{Messenger, ID_MOVEMENT, ID_OPEN},
-	rgb::{Colors, Rgb, RgbLed},
+	rgb::{Colors, RgbLed, Rgb},
 	timing::{Ticker, TimeExt},
 };
-use shutter::Shutter;
 
-//use numtoa::NumToA;
-//use core::fmt::Write;
-
-#[cfg(feature = "semihosting-debug")]
 use cortex_m_semihosting::hprintln;
 
-#[cfg(feature = "beeper")]
-static START_MELODY: [(u16, u16); 5] = [(440, 10), (0, 10), (880, 10), (0, 10), (440, 10)];
+static START_MELODY: [(u16, u16); 5] = [(440, 100), (0, 100), (880, 100), (0, 100), (440, 100)];
+static OPEN_MELODY: [(u16, u16); 5] = [(440, 100), (0, 100), (440, 100), (0, 100), (880, 1000)];
+static MOTION_MELODY: [(u16, u16); 5] = [(880, 100), (0, 100), (800, 100), (0, 100), (440, 1000)];
 
 type Duration = room_pill::timing::Duration<u32, room_pill::timing::MicroSeconds>;
 
-#[cfg(feature = "pwm-valve")]
-impl<T> MotorPin for T
-where
-	T: PwmPin,
-{
-	fn on(&mut self) {
-		self.enable();
-	}
-	fn off(&mut self) {
-		self.disable();
-	}
-}
-
-#[cfg(not(feature = "pwm-valve"))]
-impl<T> MotorPin for T
-where
-	T: OutputPin,
-{
-	fn on(&mut self) {
-		self.set_high();
-	}
-	fn off(&mut self) {
-		self.set_low();
-	}
-}
-
-enum Rooms {
-	Living,
-	Guest,
-	BathRoom1,
-
-	Nora,
-	Bed,
-	Gabor,
-	Child,
-	BathRoom2,
-	Toilett2,
-}
-
-enum Units {
-	_Circulation,	
-	_FloorHeatingl,
-	//first floor doors/lamps	
-	_DT10,//corridor
-	_DT11,//kitchen
-	_DT12,//play
-	_DT13,//living
-	_DT14,//bathroom1
-	_D14,//guest
-
-	_D20,//nora
-	_D21,//bed
-	_D22,//gabor
-	_D23,//child
-	_DT24,//bathroom2
-	_D25,//toilette2
-
-	//first floor windows - shutters/heaters
-	WS10 = 0xAC,
-	WS11 = 0xD1,
-	WS12 = 0xD7,
-	WS13, //?? = 0x83,
-	WSH14 = 0xEF,
-	//Second floor windows - shutters/heaters
-	WSH20 = 0xE9,
-	WS21, //?? = 0x83,
-	WSH22 = 0x4D,
-	WS23 = 0x85,
-	WSH24 = 0x40,
-	WSH25 = 0xED,
-	//Third floor windows
-	_WS30, 
-}
-
 #[entry]
 fn main() -> ! {
-	let dev_id = stm32_device_signature::device_id();
-	let mut chk = 0u8; //"id checksum"
-	for b in dev_id {
-		chk ^= b;
-	}
-	let (unit, room, prefix) = match chk {
-		0xAC => (Units::WS10, Rooms::Living, Some(IrCommands::Red)),
-		0xD1 => (Units::WS11, Rooms::Living, Some(IrCommands::Green)),
-		0xD7 => (Units::WS12, Rooms::Living, Some(IrCommands::Yellow)),
-		//0x83 => (Units::WS13, Rooms::Living, Some(IrCommands::Blue)),	//??
-		0xEF => (Units::WSH14, Rooms::Guest, None),
-
-		0xE9 => (Units::WSH20, Rooms::Nora, None),
-		0x83 => (Units::WS21, Rooms::Bed, Some(IrCommands::Red)), //??
-		0x4D => (Units::WSH22, Rooms::Bed, Some(IrCommands::Green)), 
-		0x85 => (Units::WS23, Rooms::Bed, Some(IrCommands::Green)), 
-		0x40 => (Units::WSH24, Rooms::Gabor, None),
-		0xED => (Units::WSH25, Rooms::Child, None),
-		
-		_ => panic!(),
-	};
-
-	window_unit_main(unit, room, prefix);
+	window_unit_main();
 }
 
-fn window_unit_main(unit_id: Units, room: Rooms, prefix: Option<IrCommands>) -> ! {
+fn window_unit_main() -> ! {
 	let device = stm32f1xx_hal::pac::Peripherals::take().unwrap();
-	let mut watchdog = IndependentWatchdog::new(device.IWDG);
-	watchdog.start(stm32f1xx_hal::time::U32Ext::ms(2_000u32));
-
 	//10 period at 50Hz, 12 period at 60Hz
 	let ac_test_period = TimeExt::us(200_000);
 	let one_sec = TimeExt::us(1_000_000);
@@ -287,7 +119,6 @@ fn window_unit_main(unit_id: Units, room: Rooms, prefix: Option<IrCommands>) -> 
 		.pclk2(72.mhz())
 		.adcclk(9.mhz()) //ADC clock: PCLK2 / 8. User specified value is be approximated using supported prescaler values 2/4/6/8.
 		.freeze(&mut flash.acr);
-	watchdog.feed();
 
 	let mut core = cortex_m::Peripherals::take().unwrap();
 	#[cfg(feature = "itm-debug")]
@@ -303,8 +134,6 @@ fn window_unit_main(unit_id: Units, room: Rooms, prefix: Option<IrCommands>) -> 
 	// A/D converter
 	let mut adc1 = adc::Adc::adc1(device.ADC1, &mut rcc.apb2, clocks);
 
-	watchdog.feed();
-
 	let mut afio = device.AFIO.constrain(&mut rcc.apb2);
 
 	//let _dma_channels = device.DMA1.split(&mut rcc.ahb);
@@ -318,8 +147,6 @@ fn window_unit_main(unit_id: Units, room: Rooms, prefix: Option<IrCommands>) -> 
 	let (pa15, _pb3_itm_swo, pb4) = afio.mapr.disable_jtag(gpioa.pa15, gpiob.pb3, gpiob.pb4);
 
 	// -------- Roll control related
-	watchdog.feed();
-
 	#[cfg(feature = "shutter-switch")]
 	let (mut switch_roll_up, mut switch_roll_down) = {
 		// Roll up switches A2 (pull down once in each main period if closed)
@@ -345,12 +172,9 @@ fn window_unit_main(unit_id: Units, room: Rooms, prefix: Option<IrCommands>) -> 
 	);
 
 	// Photoresistor on B0 (ADC8)
-	#[cfg(feature = "lux-sensor")]
 	let mut adc8_photo_resistor = gpiob.pb0.into_analog(&mut gpiob.crl);
 
 	// -------- Alarm related
-	watchdog.feed();
-
 	// Ext/Motion alarm on A4 (pull down)
 	let motion_alarm = gpioa.pa4.into_pull_up_input(&mut gpioa.crl);
 
@@ -373,51 +197,7 @@ fn window_unit_main(unit_id: Units, room: Rooms, prefix: Option<IrCommands>) -> 
 	};
 
 	// -------- Heating control related:
-	#[cfg(feature = "heating-control")]
-	let (mut valve, mut valve_motor_current_sense) = {
-		watchdog.feed();
-
-		#[cfg(feature = "pwm-valve")]
-		let valve = {
-			gpiob.pb10.into_floating_input(&mut gpiob.crh);
-			gpiob.pb11.into_floating_input(&mut gpiob.crh);
-			let mut valve_motor = Timer::tim4(device.TIM4, &clocks, &mut rcc.apb1)
-				.pwm::<Tim4NoRemap, _, _, _>(
-					(
-						gpiob.pb8.into_alternate_push_pull(&mut gpiob.crh),
-						gpiob.pb9.into_alternate_push_pull(&mut gpiob.crh),
-					),
-					&mut afio.mapr,
-					1.khz(),
-				);
-			valve_motor.set_duty(Channel::C3, valve_motor.get_max_duty() / 2);
-			valve_motor.set_duty(Channel::C4, valve_motor.get_max_duty() / 2);
-			let (a, b) = valve_motor.split();
-			Valve::new(one_sec / 2, a, b)
-		};
-
-		#[cfg(not(feature = "pwm-valve"))]
-		let valve = {
-			gpiob.pb8.into_floating_input(&mut gpiob.crh);
-			gpiob.pb9.into_floating_input(&mut gpiob.crh);
-			Valve::new(
-				one_sec / 2,
-				gpiob.pb10.into_push_pull_output(&mut gpiob.crh),
-				gpiob.pb11.into_push_pull_output(&mut gpiob.crh),
-			)
-		};
-
-		// A6 - ADC6 valve motor driver current sense shunt
-		let valve_motor_current_sense = gpioa.pa6.into_analog(&mut gpioa.crl);
-
-		// Radiator valve motor sense on A0, A1 (floating or pull down input)
-		// to see what the thermostat does by itself
-		let _sense_a = gpioa.pa0.into_floating_input(&mut gpioa.crl);
-		let _sense_b = gpioa.pa1.into_floating_input(&mut gpioa.crl);
-
-		(valve, valve_motor_current_sense)
-	};
-
+	
 	#[cfg(feature = "temp-sensor")]
 	let mut one_wire = {
 		// DS18B20 1-wire temperature sensors connected to B4 GPIO
@@ -427,9 +207,7 @@ fn window_unit_main(unit_id: Units, room: Rooms, prefix: Option<IrCommands>) -> 
 	};
 
 	// -------- Generic user interface related
-	watchdog.feed();
 
-	#[cfg(feature = "beeper")]
 	let mut piezzo = {
 		// Optional piezzo speaker on A8 (open drain output)
 		//let mut piezzo_pin = gpioa.pa8.into_open_drain_output(&mut gpioa.crh);
@@ -450,21 +228,18 @@ fn window_unit_main(unit_id: Units, room: Rooms, prefix: Option<IrCommands>) -> 
 	let mut receiver = ir::IrReceiver::new();
 
 	// RGB led on PB13, PB14, PB15 as open drain (or push pull) output
-	#[cfg(feature = "rgb-led")]
 	let mut rgb = RgbLed::new(
 		gpiob.pb13.into_open_drain_output(&mut gpiob.crh),
 		gpiob.pb15.into_open_drain_output(&mut gpiob.crh),
 		gpiob.pb14.into_open_drain_output(&mut gpiob.crh),
 	);
-	#[cfg(feature = "rgb-led")]
 	rgb.color(Colors::White).unwrap();
 
-	// C13 on board LED^	
+	// C13 on board LED^
 	let mut led = gpioc.pc13.into_open_drain_output(&mut gpioc.crh);
 	led.set_high().unwrap(); //turn off
 
-	#[cfg(feature = "usart-debug")]
-	let (mut tx, rx) = {
+	let (mut _tx, _rx) = {
 		//USART1
 		let tx = gpiob.pb6.into_alternate_push_pull(&mut gpiob.crl);
 		let rx = gpiob.pb7;
@@ -494,16 +269,13 @@ fn window_unit_main(unit_id: Units, room: Rooms, prefix: Option<IrCommands>) -> 
 
 	// C14, C15 used on the bluepill board for 32768Hz xtal
 	// -------- Init temperature measurement
-	#[cfg(feature = "temp-sensor")]
 	let address = {
-		watchdog.feed();
-
 		//store the addresses of temp sensor, start measurement
 		let mut address = [0u8; 8];
 		let mut it = RomIterator::new(0);
-		loop {
-			watchdog.feed();
 
+		#[cfg(feature = "temp-sensor")]
+		loop {
 			match one_wire.iterate_next(true, &mut it) {
 				Ok(None) => {
 					break; //no or no more devices found -> stop
@@ -519,7 +291,6 @@ fn window_unit_main(unit_id: Units, room: Rooms, prefix: Option<IrCommands>) -> 
 				}
 
 				Err(_e) => {
-					#[cfg(feature = "rgb-led")]
 					rgb.color(Colors::Red).unwrap();
 					break;
 				}
@@ -530,19 +301,23 @@ fn window_unit_main(unit_id: Units, room: Rooms, prefix: Option<IrCommands>) -> 
 		address
 	};
 
-	//Unique ID: 52ff70065065515256301387 [40, 142, 63, 191, 4, 0, 0, 153]
-	//#[cfg(feature = "semihosting-debug")]
-	//hprintln!("Unique ID: {} {:?}", stm32_device_signature::device_id_hex(), roms[0]).unwrap();
+	let dev_id = stm32_device_signature::device_id();
+	let mut chk = 0u8; //"id checksum"
+	for b in dev_id {
+		chk ^= b;
+	}
 
+	hprintln!(
+		"Unique ID: {} {} {:?}",
+		chk,
+		stm32_device_signature::device_id_hex(),
+		address
+	).unwrap();
+	
 	// -------- Config finished
-	watchdog.feed();
 	let mut shutter_power = 4000;
 	let mut shutter_command = None;
-	let mut temperature = Option::<Temperature>::None;
 	let mut lux = Option::<u32>::None;
-
-	#[cfg(feature = "heating-control")]
-	let mut heating_command = None;
 
 	#[cfg(feature = "beeper")]
 	let mut beeper = Beeper::new(&START_MELODY);
@@ -550,14 +325,11 @@ fn window_unit_main(unit_id: Units, room: Rooms, prefix: Option<IrCommands>) -> 
 	let tick = Ticker::new(core.DWT, core.DCB, clocks);
 
 	let mut last_time = tick.now();
-	let mut last_big_time = last_time;
 
-	#[cfg(feature = "rgb-led")]
 	rgb.color(Colors::Black).unwrap();
 
 	//main update loop
 	loop {
-		watchdog.feed();
 		//piezzo_pin.toggle();
 
 		// calculate the time since last execution:
@@ -585,8 +357,9 @@ fn window_unit_main(unit_id: Units, room: Rooms, prefix: Option<IrCommands>) -> 
 		);
 		//process the infrared remote inputs:
 		match ir_cmd {
-			Ok(ir::NecContent::Repeat) => {}
+			Ok(ir::NecContent::Repeat) => { led.toggle().unwrap(); }
 			Ok(ir::NecContent::Data(data)) => {
+				led.toggle().unwrap();
 				let ir_command = translate(data);
 				match ir_command {
 					IrCommands::Up => shutter_command = Some(shutter::Command::Open),
@@ -602,17 +375,6 @@ fn window_unit_main(unit_id: Units, room: Rooms, prefix: Option<IrCommands>) -> 
 					IrCommands::N7 => shutter_command = Some(shutter::Command::RollTo(700 / 13)),
 					IrCommands::N8 => shutter_command = Some(shutter::Command::RollTo(800 / 13)),
 					IrCommands::N9 => shutter_command = Some(shutter::Command::RollTo(900 / 13)),
-					_ => {}
-				};
-
-				#[cfg(feature = "heating-control")]
-				match ir_command {
-					IrCommands::Left => {
-						heating_command = Some(heating::Command::Regular(roll::Command::Open))
-					}
-					IrCommands::Right => {
-						heating_command = Some(heating::Command::Regular(roll::Command::Close))
-					}
 					_ => {}
 				};
 			}
@@ -671,103 +433,37 @@ fn window_unit_main(unit_id: Units, room: Rooms, prefix: Option<IrCommands>) -> 
 			shutter_command = None; //processed -> clear
 		}
 
-		#[cfg(feature = "heating-control")]
-		{
-			//execute the user command(s):
-			let valve_motor_current: i32 = adc1.read(&mut valve_motor_current_sense).unwrap();
-			//writeln!(tx, "{}", valve_motor_current).unwrap();
-			valve.update(heating_command, delta, valve_motor_current, 300);
-			heating_command = None; //processed -> clear
+		let mut color = Colors::Green;
+		if open_alarm.is_low() == Ok(true) {
+			color = Colors::Red;
+			beeper = Beeper::new(&OPEN_MELODY);
+			let _ = messenger.transmit(ID_OPEN, Payload::new(&address));
 		}
-
-		// do not execute the followings too often: (temperature conversion time of the sensors is a lower limit)
-		if tick.to_us(now - last_big_time) < one_sec {
-			continue;
-		};
-		last_big_time = now;
-
-		let mut color = Colors::Black;
-		if open_alarm.is_high() == Ok(true) {
-			//TODO
-			//color = Colors::Cyan;
-			//let _ = messenger.transmit(ID_OPEN, Payload::new(&address));
+		if motion_alarm.is_low() == Ok(true) {
+			color = Colors::Blue;
+			beeper = Beeper::new(&MOTION_MELODY);
+			let _ = messenger.transmit(ID_MOVEMENT, Payload::new(&address));
 		}
-		if motion_alarm.is_high() == Ok(true) {
-			//TODO
-			//color = Colors::Purple;
-			//let _ = messenger.transmit(ID_MOVEMENT, Payload::new(&address));
-		}
-		//messenger.receive_log(&mut tx);
-		while let Some((filter_match_index, time_stamp, frame)) = messenger.try_receive() {
-			// #[cfg(feature = "semihosting-debug")]
-			// hprintln!(
-			//     "Wnd f:{} t:{} i:{} d:{}",
-			//     filter_match_index,
-			//     time_stamp,
-			//     frame.id().standard(),
-			//     frame.data().data_as_u64()
-			// ).unwrap();
-
-			//TODO shutter_command = decoded can shutter control commands
-
-			#[cfg(feature = "heating-control")]
-			{
-				//TODO heating_command = decoded can temp control commands
-			}
-
-			#[cfg(feature = "beeper")]
-			{
-				//TODO receive can ring control
-				//piezzo.set_period((lux >> 3).hz());
-				//piezzo.enable(Channel::C1);
-				//delay(...);
-				//piezzo.disable(Channel::C1);
-			}
-		}
-
-		#[cfg(feature = "temp-sensor")]
-		{
-			//read sensors and restart temperature measurement
-			watchdog.feed();
-			if let Ok(temp) = one_wire.read_temperature_measurement_result(&address) {
-				if temperature != Some(temp) {
-					//TODO send can message
-					temperature = Some(temp);
-				}
-			};
-
-			let _ = one_wire.start_temperature_measurement(&address);
-		}
-
+		
 		#[cfg(feature = "lux-sensor")]
 		{
 			//measure light and send can message in case of change
-			// let light: u32 = adc1.read(&mut adc8_photo_resistor).unwrap();
-			// if lux != Some(light) {
-			// 	//TODO send can message
-			// 	lux = Some(light);
-			// 	// #[cfg(feature = "semihosting-debug")]
-			// 	// hprintln!("l {}", light);
-			// }
+			let light: u32 = adc1.read(&mut adc8_photo_resistor).unwrap();
+			if lux != Some(light) {
+				//TODO send can message
+				lux = Some(light);
+			}
 		}
-
-		#[cfg(feature = "rgb-led")]
 		rgb.color(color).unwrap();
-
-		led.toggle().unwrap();
 	}
 }
 
 #[exception]
 fn HardFault(ef: &ExceptionFrame) -> ! {
-	// #[cfg(feature = "semihosting-debug")]
-	// hprintln!("HardFault at {:#?}", ef);
 	panic!("HardFault at {:#?}", ef);
 }
 
 #[exception]
 fn DefaultHandler(irqn: i16) {
-	// #[cfg(feature = "semihosting-debug")]
-	// hprintln!("Unhandled exception (IRQn = {})", irqn);
 	panic!("Unhandled exception (IRQn = {})", irqn);
 }

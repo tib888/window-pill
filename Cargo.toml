@@ -10,16 +10,19 @@ version = "0.1.0"
 edition = "2018"
 
 [features]
-default = [ "beeper", "shutter-switch", "heating-control", "lux-sensor" ] 
-pwm-valve = []
-shutter-switch = []
-temp-sensor = []
-lux-sensor = []
-heating-control = [ "temp-sensor", "pwm-valve" ]    # pwm-valve is optional
-beeper = []
 usart-debug = []
 itm-debug = []
 semihosting-debug = []
+shutter-switch = []
+beeper = []
+lux-sensor = []
+temp-sensor = []
+rgb-led = []
+pwm-valve = [] # pwm-valve is optional, needs B8, B9 connected to B10, B11
+heating-control = [ "temp-sensor" ]  # pwm-valve
+basic = [ "beeper",  "lux-sensor" ] 
+full = [ "basic", "heating-control", "rgb-led" ]
+default = [ "basic" ] 
 
 [dependencies]
 cortex-m = "0.6.2"
@@ -29,7 +32,7 @@ typenum = "1.11.2"
 nb = "0.1.2"
 panic-halt = "0.2.0"
 # panic-itm = "0.4.1"
-numtoa = "0.2.3"
+# numtoa = "0.2.3"
 # heapless = "0.5.1"
 # owned-singleton = "0.1.0"
 
